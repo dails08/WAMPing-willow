@@ -1,0 +1,665 @@
+---
+output: html_document
+params:
+  startingDate: "2014-04-01"
+  endingDate: Sys.Date()
+---
+
+```{r,echo=FALSE, warning=FALSE, error=FALSE, include=FALSE}
+
+#=============================
+# Edit these dates 
+# They should cover the dates of the
+# current month
+#=============================
+beginDate = as.Date(params$startingDate)
+endDate = as.Date(params$endingDate)
+
+#beginDate = as.Date("2015-04-01")
+#endDate = as.Date("2015-04-28")
+
+
+#setup
+library(RODBC, quietly = TRUE)
+library(ggplot2, quietly = TRUE)
+library(plyr, quietly = TRUE)
+library(knitr, quietly = TRUE)
+library(quantmod, quietly = TRUE)
+library(reshape2, quietly = TRUE)
+library(scales, quietly = TRUE)
+
+Sys.setenv(TZ="EST")
+channel <- odbcConnectAccess2007("./Guardbase_be.accdb")
+
+totFrame <- sqlQuery(channel, "SELECT Guardsmen.ID AS Guardsman, Guardsmen.Platoon, EventTypes.Type, Events.ID AS Event, Events.Day, Events.Hour, Guardsmen.LastName, Guardsmen.FirstName, Guardsmen.Checkout, Fallouts.Position, Locations.Location, Locations.Address  FROM (((Fallouts INNER JOIN Guardsmen ON Fallouts.Guardsman = Guardsmen.ID) INNER JOIN Events ON Fallouts.Event = Events.ID) INNER JOIN EventTypes ON Events.Type = EventTypes.ID) INNER JOIN Locations ON Events.Location = Locations.ID;")
+
+totFrame$Platoon = as.character(totFrame$Platoon)
+totFrame$Platoon = ifelse(totFrame$Platoon %in% c("ADMIN", "ARMORY","DETAILS","SUPPLY","TRAINING"), "HQ", totFrame$Platoon)
+
+allGuardsmen <- sqlQuery(channel, "SELECT * FROM Guardsmen")
+allGuardsmen$Platoon = as.character(allGuardsmen$Platoon)
+allGuardsmen$Platoon = ifelse(allGuardsmen$Platoon %in% c("ADMIN","ARMORY","DETAILS","SUPPLY","TRAINING"), "HQ", allGuardsmen$Platoon)
+qualData <- sqlQuery(channel, "SELECT Quals.Qual, Quals.Guardsman, Quals.ID, QualTypes.Platoon, QualTypes.QualName, QualTypes.QualLevel FROM Quals INNER JOIN QualTypes ON Quals.Qual = QualTypes.ID;")
+
+totEventData <- sqlQuery(channel, "SELECT Events.ID, EventTypes.Type, Events.Description, Events.Day, Events.Hour, Events.Location FROM Events INNER JOIN EventTypes ON Events.Type = EventTypes.ID;")
+
+
+totFrame$Day = as.Date(totFrame$Day)
+totEventData$Day = as.Date(totEventData$Day)
+totEventData$Hour = format(totEventData$Hour, "%H%M")
+allGuardsmen$Gained = as.Date(allGuardsmen$Gained)
+allGuardsmen$PRD = as.Date(allGuardsmen$PRD)
+
+allGuardsmen$ID = factor(allGuardsmen$ID)
+totFrame$Guardsman = factor(totFrame$Guardsman)
+
+positionPlatoons <- read.csv("positionPlatoons.csv")
+minutesPerEvent = read.csv("MPE.csv")
+```
+
+```{r, echo=FALSE, results="asis"}
+
+
+
+
+guardsmen <- subset(allGuardsmen, Platoon!= "IT" & Platoon != "STAFF" & Platoon != "N" & Platoon != "TAD" & (is.na(PRD) | PRD > beginDate))
+squadLeaders = subset(allGuardsmen, Platoon == "SL" & (is.na(PRD) | PRD > beginDate))
+
+detFrame <- subset(totFrame, Day >= beginDate & Day <= endDate)
+
+#Get staff fallouts before factoring the ID column
+staffers <- subset(allGuardsmen, Platoon == "STAFF" & (is.na(PRD) | PRD > beginDate))
+
+staffFallouts = subset(detFrame, Platoon == "STAFF")
+#Factor the ID column to get more accurate results later with simpler syntax
+detFrame$Guardsman = factor(detFrame$Guardsman, levels = guardsmen$ID)
+
+eventData <- droplevels(subset(totEventData, as.Date(Day) >= beginDate & as.Date(Day) <= endDate))
+
+numberOfEvents = nrow(eventData)
+```
+
+
+```{r falloutdays, echo = FALSE, results = "asis", fig.align = "center"}
+falloutDays = data.frame(table(unique(detFrame[,c("Guardsman","Day")])[,"Guardsman"]))
+colnames(falloutDays) = c("Guardsman","Days")
+
+```
+
+```{r eventbreakdown,echo=FALSE, results="asis",warning=FALSE, fig.align = "center"}
+
+
+eventBreakdown = arrange(data.frame(table(eventData$Type)), -Freq)
+colnames(eventBreakdown) = c("Type","Count")
+
+eventBreakdownGraph = ggplot(eventBreakdown, aes(Type, Count)) + geom_bar(stat="identity", color = "black", fill = "white") + theme(axis.text.x = element_text(angle=90, hjust=1, vjust=.5)) + labs(title="Breakdown of Events by Type")
+
+```
+
+
+```{r, echo=FALSE, results = "asis", fig.align = "center", warning = FALSE}
+#Fallout calculations
+#using the dataframe created in the Command Level chunk
+numberOfGuardsmenGraph = ggplot(falloutDays, aes(Days)) + geom_histogram(color = "black",fill = "white", binwidth = 1) + labs(title = "Number of Days\nGuardsmen Fell Out", x = "Days Falling Out", y = "Number of Guardsmen")
+```
+
+```{r falloutsperday,echo=FALSE, results="asis", fig.align = "center"}
+#Number of Guardsmen falling out by day
+
+dayFallouts = data.frame(unique(detFrame[,c("Guardsman","Day")]))
+
+falloutCounts = arrange(ddply(dayFallouts, .variables = "Day", .fun = summarize, total = sum(!is.na(Guardsman))), desc(total))
+
+falloutCountsGraph = ggplot(falloutCounts, aes(Day, total)) + geom_bar(stat = "identity", color = "black", fill = "white") + scale_x_date(seq.Date(beginDate, endDate, "days"), date_breaks = "1 day") + labs(title = "Number of Guardsmen Falling Out Per Day", y = "Number of Guardsmen", x = "Day")  + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5))
+```
+
+```{r manhours, echo = FALSE, results = "asis", warning = FALSE, fig.align="center"}
+#assessing manhour requirements
+manHours = ddply(merge(detFrame, minutesPerEvent, by.x = "Type", by.y = "Event"), .variables = "Type", .fun = summarize, manhours = sum(Minutes/60))
+
+manhoursGraph = ggplot(manHours, aes(Type, manhours)) + geom_bar(stat = "identity", color = "black", fill = "white") + labs(title = "Manhours by Event Type", x = "Event Type", y = "Manhours") + theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+manhoursNonFuneralGraph = ggplot(subset(manHours, !(Type %in% c("FHF","SHF"))), aes(Type, manhours)) + geom_bar(stat = "identity", color = "black", fill = "white") + labs(title = "Manhours by Event Type:\nNon-Funerals", x = "Event Type", y = "Manhours") + theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+```
+
+```{r totalsupes, echo = FALSE, results = "asis", fig.width = 10, fig.height = 25, fig.align = "center", warning = FALSE}
+#Fallout Superlatives
+
+inTotal = merge(falloutDays, guardsmen, by.x = "Guardsman", by.y = "ID")[,c("Guardsman", "LastName","FirstName","Platoon", "Days")]
+
+inTotal = arrange(inTotal, desc(LastName), desc(FirstName))
+inTotal$Guardsman = factor(inTotal$Guardsman, levels = as.character(inTotal$Guardsman))
+
+
+#flipped
+individualFalloutsGraph = ggplot(inTotal, aes(Guardsman, Days)) + geom_bar(stat = "identity", color = "black", aes(fill = Platoon)) + scale_x_discrete(breaks = inTotal$Guardsman, labels = inTotal$LastName) + labs(title = "Days Falling Out\nBy Guardsman\nCommand-wide")  + coord_flip() 
+```
+
+```{r superlatives, echo = FALSE, results = "asis", fig.align = "center"}
+#top 20
+topTwenty = tail(arrange(inTotal, Days), 20)
+topTwenty = arrange(topTwenty, Days, LastName)
+topTwenty$Guardsman = factor(topTwenty$Guardsman, levels = as.character(topTwenty$Guardsman))
+topTwentyGraph = ggplot(topTwenty, aes(Guardsman, Days)) + geom_bar(stat = "identity", color = "black", aes(fill = Platoon)) + scale_x_discrete(breaks = topTwenty$Guardsman, labels = topTwenty$LastName) + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5)) + labs(title = "Top 20")
+
+#bottom 20
+bottomTwenty = head(arrange(inTotal, Days), 20)
+bottomTwenty = arrange(bottomTwenty, Days, LastName)
+bottomTwenty$Guardsman = factor(bottomTwenty$Guardsman, levels = as.character(bottomTwenty$Guardsman))
+bottomTwentyGraph = ggplot(bottomTwenty, aes(Guardsman, Days)) + geom_bar(stat = "identity", color = "black", aes(fill = Platoon)) + scale_x_discrete(breaks = bottomTwenty$Guardsman, labels = bottomTwenty$LastName) + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5)) + labs(title = "Bottom 20")
+```
+
+```{r, echo = FALSE, results = "asis", fig.width = 12, fig.height = 10, fig.align = "center", warning = FALSE}
+
+#by platoon
+platoon.data = ddply(inTotal, .variables = "Platoon", .fun = summarize, ave = mean(Days, na.rm = TRUE))
+inTotal = arrange(inTotal, LastName, Days)
+
+platoonDataGraph = ggplot(inTotal, aes(Guardsman, Days)) + geom_bar(stat = "identity", color = "black", aes(fill = Platoon)) + scale_x_discrete(breaks = inTotal$Guardsman, labels = inTotal$LastName) + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5), legend.position = "none") + labs(title = "Days Falling Out\nBy Guardsman\nCommand-wide") + facet_wrap(facets = ~ Platoon, scales = "free_x", ncol = 3) + geom_hline(yintercept = mean(inTotal$Days),color = "green") + geom_hline(aes(yintercept = ave), color = "red", data = platoon.data)
+
+```
+
+
+```{r weekendfallouts, echo = FALSE, results = "asis", fig.align = "center", warning= FALSE}
+
+weekendFallouts = unique(subset(detFrame, weekdays(detFrame$Day) %in% c("Saturday","Sunday"))[,c("Guardsman","LastName","FirstName","Platoon","Day")])
+#to get rid of staff NAs
+weekendFallouts = na.omit(weekendFallouts)
+
+weekendFallouts = arrange(weekendFallouts, LastName, FirstName)
+weekendFallouts$Guardsman = factor(weekendFallouts$Guardsman, levels = as.character(weekendFallouts$Guardsman))
+
+numberOfWeekendFallouts = nrow(weekendFallouts)
+
+if (numberOfWeekendFallouts > 0){
+  weekendFalloutsExist = TRUE
+  
+weekendFalloutsGraph = ggplot(weekendFallouts, aes(Guardsman)) + geom_bar(color = "black", aes(fill = Platoon)) + scale_x_discrete(breaks = weekendFallouts$Guardsman, labels = weekendFallouts$LastName) + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5)) + labs(title = "Weekend Fallouts", y = "Weekend Fallout Days")
+} else{
+  weekendFalloutsExist = FALSE
+}
+
+```
+
+```{r cosguidance, echo = FALSE, results = "asis", fig.width = 12, fig.height = 10, fig.align = "center", warning = FALSE}
+#Assessing accomplishment of CO's guidance
+
+basics = totFrame[,c("Guardsman", "Platoon", "Type","Day")]
+basics$Month = paste( format(basics$Day, "%b"), format(basics$Day, "%y"), sep = "")
+basics$numMonth = paste( format(basics$Day, "%y"), format(basics$Day, "%m"), sep = "")
+
+basics$Type = ifelse(basics$Type %in% c("FHF","SHF","1-BB","8-BB"), "Funeral","Non-Funeral")
+
+funerals = subset(basics, Type == "Funeral")
+
+
+permonth = ddply(funerals, .variables = .(Guardsman, Month, numMonth), summarize, Fallouts = length(unique(Day)))
+permonth = arrange(permonth, Guardsman, Month, numMonth)
+
+permonth = merge(permonth, allGuardsmen[,c("ID","Platoon")], by.x="Guardsman", by.y="ID")
+
+#CO's guidance overall
+overallCOGuidanceGraph = ggplot(permonth, aes(numMonth, Fallouts)) + geom_boxplot() + geom_jitter(aes(color = Fallouts < 13)) + labs(title="Funeral Fallout Days \nper Month per Guardsman", x = "Month") + scale_x_discrete(breaks = permonth$numMonth, labels = permonth$Month) 
+
+permonthMain = subset(permonth, Platoon %in% c("FP","CB","DT","CL"))
+
+#CO's guidance broken up by platoon
+overallCOGuidancePlatoonGraph = ggplot(permonthMain, aes(numMonth, Fallouts)) + geom_boxplot() + geom_jitter(aes(color = Fallouts < 13)) + facet_grid(. ~ Platoon) + labs(title="Funeral Fallout Days \nper Month per Guardsman", x = "Month") + scale_x_discrete(breaks = permonth$numMonth, labels = permonth$Month) + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5))
+
+
+uniqueBasics = unique(basics[,c("Guardsman","Type","Day","Month","numMonth")])
+relevantBasics = subset(uniqueBasics, Month == "Mar15")
+typeCounts = data.frame(table(relevantBasics[,c("Guardsman","Type")]))
+finalCounts = merge(guardsmen[,c("ID","LastName","FirstName", "Platoon")], typeCounts, by.x = "ID", by.y = "Guardsman")
+
+
+finalCounts = arrange(finalCounts, LastName, FirstName, Type)
+
+finalCounts$ID = factor(finalCounts$ID, levels = finalCounts$ID)
+
+finalCounts$Platoon = factor(finalCounts$Platoon, levels = c("CB","FP","DT","CL","DETAILS","TRAINING","ADMIN", "SL","IT"))
+
+dichotomyGraph = ggplot(finalCounts, aes(ID, Freq)) + geom_bar(stat = "identity", aes(fill = Type), ) + facet_wrap(~ Platoon, ncol = 3, scales = "free_x") + scale_x_discrete(breaks = finalCounts$ID, labels = finalCounts$LastName) + scale_y_continuous(breaks = seq(0,20,5), minor_breaks = seq(0,20,1)) + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5)) + labs(title = paste("Fallout Stats for", format(Sys.Date(), "%B"), "\n", "From", beginDate, "Until",endDate), x = "Guardsman", y = "Fallouts") + geom_hline(yintercept = 12, color = "red")
+```
+
+```{r funeralrates, echo = FALSE, results = "asis", fig.align = "center"}
+#calculating funeral rates
+
+funeralFallouts = unique(subset(detFrame, Type %in% c("FHF","SHF","1-BB","8-BB"))[,c("Guardsman","LastName","FirstName","Platoon","Day")])
+funeralFallouts = na.omit(funeralFallouts)
+funeralDays = ddply(funeralFallouts, .variables = "Guardsman", .fun = summarize, Days = sum(!is.na(Guardsman)))
+funeralDays = merge(funeralDays, guardsmen[,c("ID","LastName","FirstName","Platoon")], by.x = "Guardsman", by.y = "ID")
+
+funeralRatesGraph = ggplot(funeralDays, aes(Days)) + geom_histogram(color = "black", aes(fill = Platoon), binwidth = 1) + facet_wrap(facets = ~ Platoon) + labs(title = "Funeral Fallout Days", y = "Number ofGuardsmen") + theme(legend.position = "none")
+```
+
+```{r overages, echo = FALSE, results = "asis", fig.align = "center"}
+#Overages, people violating CO's guidance for funerals
+thisMonth = paste(format(beginDate, "%b"), format(beginDate, "%y"), sep = "")
+overages = data.frame(table(subset(permonth, Fallouts > 12 & Month == thisMonth)[,"Platoon"]))
+
+overagesGraph = ggplot(overages, aes(Var1, Freq)) + geom_bar(stat="identity") + theme(axis.text.x = element_text(angle=90, hjust=1, vjust = .5)) + labs(title = "Number of Guardsmen\nViolating CO's Funeral Guidance", x = "Platoon", y = "# of Guardsmen")
+
+perMonthNames = merge(permonth, guardsmen[,c("ID", "LastName", "FirstName","Platoon")], by.x = "Guardsman", by.y = "ID")
+
+overageGuardsmen = subset(perMonthNames, Fallouts > 12 & Month == thisMonth)[,c("LastName", "FirstName", "Platoon.x", "Fallouts")]
+
+numberOfOverages = nrow(overageGuardsmen)
+
+if (numberOfOverages > 0) {
+  overageGuardsmenExist = TRUE
+colnames(overageGuardsmen) = c("Last Name", "First Name", "Platoon", "Funeral Days")
+rownames(overageGuardsmen) = NULL
+  } else{
+    overageGuardsmenExist = FALSE
+  }
+```
+
+```{r, echo = FALSE, results = "asis", warning = FALSE, fig.align = "center"}
+falloutsbyDayandType <- detFrame[,c("Guardsman", "Type","Day")]
+falloutsbyDayandType$TypeChar <- as.character(falloutsbyDayandType$Type)
+  
+falloutsbyDayandType[falloutsbyDayandType$TypeChar %in% c("FHF","SHF", "8-BB"),"TypeChar"] <- "Funerals"
+falloutsbyDayandType <- falloutsbyDayandType[,-2]
+falloutsbyDayandType$TypeChar <- factor(falloutsbyDayandType$TypeChar)
+colnames(falloutsbyDayandType) <- c("Guardsman","Day","Type")
+falloutsbyDayandType <- unique(falloutsbyDayandType)
+
+falloutsbyDayandType <- falloutsbyDayandType[,-3]
+doubleFallouts <- subset(data.frame(table(falloutsbyDayandType)), Freq>1)
+
+doubleFallouts <- merge(doubleFallouts, guardsmen[,c("ID","Platoon")], by.x="Guardsman", by.y="ID")
+doubleFallouts$Day = as.Date(doubleFallouts$Day)
+
+numberOfMultipleDetails = nrow(doubleFallouts)
+
+if (numberOfMultipleDetails > 0) {
+  doubleFalloutsExist = TRUE
+  multipleFalloutsGraph = ggplot(doubleFallouts, aes(x=Day, fill=factor(Freq))) + geom_bar(binwidth = 1) + theme(axis.text.x = element_text(angle=90, vjust=1, hjust=1)) + scale_x_date(breaks = seq.Date(beginDate, endDate, "days")) + scale_fill_discrete(name="# of Times Detailed", breaks=c(2,3), labels=c("Double Detailed","Triple Detailed")) + labs(title="Multiple Detail Days by Date", x="Date",y="Number of Guardsmen") + facet_grid(Platoon ~ .)
+  
+  
+  deets = merge(doubleFallouts, guardsmen[,c("ID","LastName","FirstName","Platoon")], by.x = "Guardsman", by.y = "ID")[,c("LastName","FirstName","Day","Freq","Platoon.x")]
+  colnames(deets) = c("Last Name", "First Name", "Day","Times Detailed","Platoon")
+  deets = deets[,c("Last Name","First Name", "Platoon", "Day", "Times Detailed")]
+  
+  
+  
+}else{
+  doubleFalloutsExist = FALSE
+}
+
+```
+
+```{r squadleaders, echo = FALSE, results = "asis"}
+#Measuring Squad Leader fallout rates
+
+slFallouts = subset(detFrame, Guardsman %in% squadLeaders$ID)
+
+slSummary = ddply(slFallouts, .variables = c("Guardsman", "LastName"), .fun = summarize, Days = length(unique(Day)))
+
+slFallouts = nrow(slSummary)
+
+if (slFallouts > 0){
+  slFalloutsExist = TRUE
+slFalloutsGraph = ggplot(slSummary, aes(Guardsman, Days)) + geom_bar(stat = "identity", color = "black", fill = "white") + scale_x_discrete(breaks = slSummary$Guardsman, labels = slSummary$LastName) + labs(title = "Squad Leader Fallout Days") 
+} else{
+  slFalloutsExist = FALSE
+}
+```
+
+
+```{r byqual, echo = FALSE, results = "asis", warning=FALSE, fig.align = "center"}
+#Fallout rates by qual level
+######
+#Finding someone's highest qual
+######
+
+topQuals = ddply(qualData, .variables = c("Guardsman","Platoon"), .fun = summarize, QualLevel = max(QualLevel))
+QualList = merge(guardsmen[,c("ID","LastName","FirstName","Platoon","PRD")], topQuals, by.x = c("ID","Platoon"), by.y = c("Guardsman", "Platoon"))
+
+QualList = arrange(QualList, Platoon, QualLevel, LastName)
+
+
+
+############
+# Fallout rates by qual level
+############
+
+recentBasics = detFrame[,c("Guardsman", "Platoon", "Type","Day")]
+
+recentBasics$Type = ifelse(recentBasics$Type %in% c("FHF","SHF","1-BB","8-BB"), "Funeral","Non-Funeral")
+
+recentFunerals = subset(recentBasics, Type == "Funeral")
+
+uniques = unique(recentBasics[,c("Guardsman","Type","Day")])
+
+uniques = data.frame(table(uniques[,c("Guardsman","Type")]))
+
+
+Quallouts = merge(QualList, uniques, by.x = "ID", by.y = "Guardsman")
+
+qualGraph1 = ggplot(Quallouts, aes(QualLevel, Freq)) + geom_smooth(method = "loess") + geom_jitter() + facet_grid(Platoon ~ Type) + labs(title = paste("Fallout Rates\nby Qual Level\n", beginDate, "-", endDate)) 
+
+
+results = ddply(Quallouts, .variables = c("Platoon", "QualLevel","Type","QualLevel"), .fun = summarize, ave = mean(Freq))
+
+
+
+
+```
+
+```{r stafffalouts, echo = FALSE, results = "asis", warning=FALSE, fig.align = "center"}
+#Using  staffFallouts created in the setup phase
+
+staffFallouts$Guardsman = factor(staffFallouts$Guardsman, levels = staffers$ID)
+
+staffFalloutDays = data.frame(table(unique(staffFallouts[,c("Guardsman","Day")])[,"Guardsman"]))
+colnames(staffFalloutDays) = c("StaffMember","Days")
+staffFallouts = merge(staffers[,c("ID","LastName","FirstName")], staffFalloutDays, by.x = "ID", by.y = "StaffMember")
+staffFallouts = arrange(staffFallouts, LastName, FirstName)
+staffFallouts$ID = factor(staffFallouts$ID, levels = as.character(staffFallouts$ID))
+staffFalloutsGraph = ggplot(staffFallouts, aes(ID, Days)) + geom_bar(stat = "identity", color = "black",fill = "white") + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5)) + scale_x_discrete(breaks = staffFallouts$ID, labels = paste(staffFallouts$LastName, ",",substr(staffFallouts$FirstName,1,1))) + labs(title = "Staff Fallout Days", x = "Staff Member", y = "Fallout Days")
+```
+
+```{r highlevelview, echo = FALSE, results = "asis", warning = FALSE, fig.align = "center"}
+#Generating the high level view
+bodyCount <- data.frame(colSums(table(unique(totFrame[c("Guardsman","Day")]))))
+bodyCount$Date <- rownames(bodyCount)
+rownames(bodyCount) <- NULL
+names(bodyCount) <- c("Count","Date")
+dat = bodyCount
+colnames(dat) = c("count","date")
+# We will facet by year ~ month, and each subgraph will
+
+# show week-of-month versus weekday
+
+# the year is simple
+
+dat$year<-as.numeric(as.POSIXlt(dat$date)$year+1900)
+
+# the month too 
+
+dat$month<-as.numeric(as.POSIXlt(dat$date)$mon+1)
+
+# but turn months into ordered factors to control the appearance/ordering in the presentation
+
+dat$monthf<-factor(dat$month,levels=as.character(1:12),labels=c("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"),ordered=TRUE)
+
+# the day of week is again easily found
+
+dat$weekday = as.POSIXlt(dat$date)$wday
+
+# again turn into factors to control appearance/abbreviation and ordering
+
+# I use the reverse function rev here to order the week top down in the graph
+
+# you can cut it out to reverse week order
+
+dat$weekdayf<-factor(dat$weekday,levels=rev(0:6),labels=rev(c("Sun","Mon","Tue","Wed","Thu","Fri","Sat")),ordered=TRUE)
+
+# the monthweek part is a bit trickier 
+
+# first a factor which cuts the data into month chunks
+
+
+dat$yearmonth<-as.yearmon(dat$date)
+
+dat$yearmonthf<-factor(dat$yearmonth)
+
+# then find the "week of year" for each day
+
+dat$week <- as.numeric(format(as.Date(dat$date),"%W"))
+
+# and now for each monthblock we normalize the week to start at 1 
+
+dat<-ddply(dat,.(yearmonthf),transform,monthweek=1+week-min(week))
+
+
+# Now for the plot
+
+longViewGraph = ggplot(dat, aes(monthweek, weekdayf, fill = count)) + 
+  
+  geom_tile(color = "white") + facet_grid(year~monthf) + scale_fill_gradient(low="white", high="red") +
+  
+  labs(title = "Number of Guardsmen Falling Out Per Day", x = "Week of Month", y = "")
+
+
+```
+
+```{r, echo = FALSE, results = "asis", warning=FALSE, fig.align = "center"}
+#Calculating the 90 day view
+
+ninetyEndDate = endDate
+ninetyBeginDate = ninetyEndDate - 90
+
+
+ninetyGuardsmen = subset(allGuardsmen, Platoon != "IT" & Platoon != "STAFF" & Platoon != "N" & Platoon != "TAD" & (is.na(PRD) | PRD > ninetyBeginDate))
+
+
+
+#Get staff fallouts before factoring the ID column
+ninetyStaffers <- subset(allGuardsmen, Platoon == "STAFF" & (is.na(PRD) | PRD > ninetyBeginDate))
+
+ninetyStaffers$ID = droplevels(ninetyStaffers$ID)
+
+ninetyStaffFallouts = subset(totFrame, Day >= ninetyBeginDate & Platoon == "STAFF")
+
+ninetyStaffFallouts$Type = ifelse(ninetyStaffFallouts$Type %in% c("FHF","SHF","1-BB","8-BB"), "Funeral","Non-Funeral")
+ninetyStaffFallouts$Type = factor(ninetyStaffFallouts$Type, levels = c("Funeral","Non-Funeral"))
+
+
+ninetyStaffFallouts = unique(ninetyStaffFallouts[,c("Guardsman","Type","Day")])
+ninetyStaffFallouts$Guardsman = factor(ninetyStaffFallouts$Guardsman, levels = ninetyStaffers$ID)
+ninetyStaffFinalCounts = merge(ninetyStaffers[,c("ID","LastName","FirstName")], data.frame(table(ninetyStaffFallouts[,c("Guardsman","Type")])), by.x = "ID", by.y = "Guardsman")
+
+ninetyStaffFinalCounts = arrange(ninetyStaffFinalCounts, LastName, FirstName, Type)
+ninetyStaffFinalCounts$ID = factor(ninetyStaffFinalCounts$ID, levels = ninetyStaffFinalCounts$ID)
+
+ninetyStaffFalloutsGraph = ggplot(ninetyStaffFinalCounts, aes(ID, Freq)) + geom_bar(stat = "identity", aes(fill = Type))  + scale_x_discrete(breaks = ninetyStaffFinalCounts$ID, labels = ninetyStaffFinalCounts$LastName) + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5)) + labs(title = paste("Staff Fallout Stats\nFrom", ninetyBeginDate, "Until",ninetyEndDate), x = "Staff Member", y = "Fallouts")
+
+
+#Factor the ID column to get more accurate results later with simpler syntax
+
+ninetyEventData = droplevels(subset(totEventData, as.Date(Day) >= ninetyBeginDate & as.Date(Day) <= ninetyEndDate))
+
+ninetyBasics = totFrame[totFrame$Day >= ninetyBeginDate, c("Guardsman","Type","Day")]
+
+ninetyBasics$Type = ifelse(ninetyBasics$Type %in% c("FHF","SHF","1-BB","8-BB"), "Funeral","Non-Funeral")
+
+
+
+ninetyUniqueBasics = unique(ninetyBasics[,c("Guardsman","Type","Day")])
+
+
+ninetyTypeCounts = data.frame(table(ninetyUniqueBasics[,c("Guardsman","Type")]))
+
+
+ninetyFinalCounts = merge(ninetyGuardsmen[,c("ID","LastName","FirstName", "Platoon")], ninetyTypeCounts, by.x = "ID", by.y = "Guardsman")
+
+ninetyFinalCounts = arrange(ninetyFinalCounts, LastName, FirstName, Type)
+
+
+ninetyFinalCounts$ID = factor(ninetyFinalCounts$ID, levels = ninetyFinalCounts$ID)
+
+
+
+ninetyFinalCounts$Platoon = as.character(ninetyFinalCounts$Platoon)
+ninetyFinalCounts$Platoon = ifelse(ninetyFinalCounts$Platoon %in% c("ADMIN","ARMORY","DETAILS","SUPPLY","TRAINING"), "HQ",ninetyFinalCounts$Platoon)
+
+
+
+ninetyFinalCounts$Platoon = factor(ninetyFinalCounts$Platoon, levels = c("CB","FP","DT","CL", "HQ","MP", "SL"))
+ninetyFinalCounts = arrange(ninetyFinalCounts, LastName, FirstName)
+ninetyFinalCounts$ID = factor(ninetyFinalCounts$ID, levels = ninetyFinalCounts$ID)
+
+
+ninetyFalloutsGraph = ggplot(ninetyFinalCounts, aes(ID, Freq)) + geom_bar(stat = "identity", aes(fill = Type), ) + facet_wrap(~ Platoon, ncol = 2, scales = "free_x") + scale_x_discrete(breaks = ninetyFinalCounts$ID, labels = ninetyFinalCounts$LastName) + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5)) + labs(title = paste("Fallout Stats\nFrom", ninetyBeginDate, "Until",ninetyEndDate), x = "Guardsman", y = "Fallouts")
+
+
+
+```
+
+
+<center>US Navy Ceremonial Guard Operations Report</center>
+<center>`r beginDate` to `r endDate`</center>
+\n\n\n
+
+```{r, echo = FALSE, results = "asis", fig.align = "center", fig.height=3, fig.width=10}
+
+longViewGraph
+
+writeLines(sprintf("The command participated in %d events this period.\n", numberOfEvents))
+writeLines(sprintf("The average number of days falling out by a Guardsmen was %.1f.  Half of all Guardsmen fell out %.0f days or less. The standard deviation of fallout days was %.1f.  The most days fallen out by any Guardsmen was %d.  These numbers do not include Trainees, Staff, or TADs.\n", mean(falloutDays$Days), median(falloutDays$Days), sd(falloutDays$Days), max(falloutDays$Days)))
+
+if(slFalloutsExist == FALSE){
+  writeLines(sprintf("There were no Squad Leader fallouts this period.\n"))
+} else{
+  writeLines(sprintf("The number of Squad Leader fallouts this period was %d.\n", slFallouts))
+}
+
+if(numberOfMultipleDetails == 0){
+  writeLines(sprintf("There were no multiple details this period.\n"))
+} else{
+  writeLines(sprintf("The number of multiple details this period was %d.\n", numberOfMultipleDetails))
+}
+
+if(numberOfOverages == 0){
+  writeLines(sprintf("There were no violations of CO's funeral fallout guidance this period.\n"))
+} else{
+  writeLines(sprintf("The number of violations of CO's funeral guidance this period was %d.\n", numberOfOverages))
+}
+
+if(numberOfWeekendFallouts == 0){
+  writeLines(sprintf("There were no weekend fallouts this period.\n"))
+} else{
+  writeLines(sprintf("The number of weekend fallouts this period was %d.\n", numberOfWeekendFallouts))
+}
+
+
+writeLines(" \n \n \n")
+```
+
+```{r,echo=FALSE, results="asis",warning=FALSE, fig.align = "center"}
+
+eventBreakdownGraph
+
+```
+
+
+```{r, echo=FALSE, results = "asis", fig.align = "center", warning = FALSE}
+#Fallout calculations
+
+numberOfGuardsmenGraph
+```
+
+```{r,echo=FALSE, results="asis", fig.align = "center"}
+#Number of Guardsmen falling out by day
+
+falloutCountsGraph
+
+writeLines(sprintf("\n\n\n\n"))
+
+```
+
+```{r, echo = FALSE, results = "asis", warning = FALSE, fig.align="center"}
+#assessing manhour requirements
+manhoursGraph
+
+manhoursNonFuneralGraph
+```
+
+```{r, echo = FALSE, results = "asis", fig.width = 10, fig.height = 25, fig.align = "center", warning = FALSE}
+#Fallout Superlatives
+
+individualFalloutsGraph
+```
+
+```{r, echo = FALSE, results = "asis", fig.align = "center"}
+#top 20
+topTwentyGraph
+
+#bottom 20
+bottomTwentyGraph
+```
+
+```{r, echo = FALSE, results = "asis", fig.width = 12, fig.height = 10, fig.align = "center", warning = FALSE}
+
+platoonDataGraph
+```
+
+
+```{r, echo = FALSE, results = "asis", fig.width = 12, fig.height=10, fig.align = "center", warning= FALSE}
+if (nrow(weekendFallouts) > 0){
+weekendFalloutsGraph
+}
+
+```
+
+```{r, echo = FALSE, results = "asis", fig.width = 12, fig.height = 10, fig.align = "center", warning = FALSE}
+#Assessing accomplishment of CO's guidance
+#CO's guidance overall
+overallCOGuidanceGraph
+#CO's guidance broken up by platoon
+overallCOGuidancePlatoonGraph
+```
+
+```{r, echo = FALSE, results = "asis", fig.align = "center"}
+#calculating funeral rates
+funeralRatesGraph
+```
+
+```{r, echo = FALSE, results = "asis", fig.align = "center"}
+#Overages, people violating CO's guidance for funerals
+if (numberOfOverages > 0) {
+  overagesGraph
+writeLines(sprintf("Guardsman violating CO's Funeral Guidance\n"))
+colnames(overageGuardsmen) = c("Last Name", "First Name", "Platoon", "Funeral Days")
+rownames(overageGuardsmen) = NULL
+kable(overageGuardsmen, align = "c")
+  }
+```
+
+```{r, echo = FALSE, results = "asis", warning = FALSE, fig.align = "center"}
+
+  multipleFalloutsGraph
+
+
+if (numberOfMultipleDetails > 0) {
+  
+  multipleFalloutsGraph
+  
+  deets = merge(doubleFallouts, guardsmen[,c("ID","LastName","FirstName","Platoon")], by.x = "Guardsman", by.y = "ID")[,c("LastName","FirstName","Day","Freq","Platoon.x")]
+  colnames(deets) = c("Last Name", "First Name", "Day","Times Detailed","Platoon")
+  deets = deets[,c("Last Name","First Name", "Platoon", "Day", "Times Detailed")]
+  writeLines(sprintf("Guardsman multiple detailed\n"))
+  
+  kable(arrange(deets, Day, Platoon), align = "c")
+}
+```
+
+```{r, echo = FALSE, results = "asis", warning = FALSE, fig.align = "center"}
+#Measuring Squad Leader fallout rates
+if (nrow(slSummary) > 0){
+  slFalloutsGraph
+}
+```
+
+```{r, echo = FALSE, results = "asis", warning = FALSE, fig.align = "center"}
+#Using  staffFallouts created in the setup phase
+staffFalloutsGraph
+```
+
+```{r, echo = FALSE, results = "asis", warning = FALSE, fig.align = "center"}
+qualGraph1
+
+```
+
+#90 Day View
+
+```{r, echo = FALSE, results = "asis", fig.width = 12, fig.height=10, fig.align = "center", warning= FALSE}
+ninetyFalloutsGraph
+
+ninetyStaffFalloutsGraph
+
+
+```
